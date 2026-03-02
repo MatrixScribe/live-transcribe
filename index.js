@@ -1,66 +1,51 @@
 // index.js
+import express from "express";
+import cors from "cors";
+import fs from "fs";
+import { fileURLToPath } from "url";
+import { dirname, join } from "path";
+import OpenAI from "openai";
 
-require("dotenv").config();
-
-const express = require("express");
-const cors = require("cors");
-const fs = require("fs");
-const path = require("path");
-const OpenAI = require("openai");
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
 
 const app = express();
+const PORT = process.env.PORT || 3000;
 
 // Middleware
 app.use(cors());
-app.use(express.json({ limit: "50mb" }));
+app.use(express.json({ limit: "50mb" })); // large chunks
 
-// OpenAI (NEW SDK — correct way)
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
-});
+// OpenAI client
+const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-// Health check
-app.get("/", (req, res) => {
-  res.send("Live Transcribe Server is running.");
-});
+// Root endpoint
+app.get("/", (req, res) => res.send("Live transcription server running."));
 
 // Transcription endpoint
 app.post("/transcribe", async (req, res) => {
   try {
     const { audioBase64 } = req.body;
+    if (!audioBase64) return res.status(400).json({ error: "No audioBase64 provided" });
 
-    if (!audioBase64) {
-      return res.status(400).json({ error: "No audio provided" });
-    }
+    // Convert base64 to buffer
+    const audioBuffer = Buffer.from(audioBase64, "base64");
+    const tempFile = join(__dirname, `temp-${Date.now()}.webm`);
+    fs.writeFileSync(tempFile, audioBuffer);
 
-    const tempFilePath = path.join(__dirname, "temp-audio.wav");
-
-    // Convert base64 ? file
-    const buffer = Buffer.from(audioBase64, "base64");
-    fs.writeFileSync(tempFilePath, buffer);
-
-    // Send to OpenAI Whisper
-    const response = await openai.audio.transcriptions.create({
-      file: fs.createReadStream(tempFilePath),
+    // Call OpenAI Whisper
+    const transcription = await openai.audio.transcriptions.create({
+      file: fs.createReadStream(tempFile),
       model: "whisper-1",
     });
 
-    // Clean up temp file
-    fs.unlinkSync(tempFilePath);
-
-    res.json({ transcript: response.text });
-
-  } catch (error) {
-    console.error("Transcription error:", error);
-    res.status(500).json({
-      error: "Transcription failed",
-      details: error.message,
-    });
+    fs.unlinkSync(tempFile); // clean up temp file
+    res.json({ transcript: transcription.text });
+  } catch (err) {
+    console.error("Transcription error:", err);
+    res.status(500).json({ error: err.message });
   }
 });
 
 // Start server
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
-});
+app.listen(PORT, () => console.log(`Server listening on port ${PORT}`));
