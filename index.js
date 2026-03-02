@@ -15,13 +15,11 @@ const app = express();
 const PORT = process.env.PORT || 10000;
 
 // ---------------- Middleware ----------------
-app.use(cors()); // allow requests from anywhere (adjust if needed)
-app.use(bodyParser.json({ limit: "10mb" })); // handle large audio chunks
+app.use(cors());
+app.use(bodyParser.json({ limit: "15mb" })); // allow bigger chunks
 
 // ---------------- OpenAI Client ----------------
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY
-});
+const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 // ---------------- POST /transcribe ----------------
 app.post("/transcribe", async (req, res) => {
@@ -32,19 +30,23 @@ app.post("/transcribe", async (req, res) => {
     // Convert base64 to Uint8Array
     const audioBuffer = new Uint8Array(decode(audioBase64));
 
-    // Save temporarily as file
-    const fileName = path.join(__dirname, `${sessionId || "session"}-${Date.now()}.webm`);
+    // Save temp WAV file for this chunk
+    const tempDir = path.join(__dirname, "temp");
+    if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir);
+
+    const fileName = path.join(tempDir, `${sessionId || "session"}-${Date.now()}.wav`);
     fs.writeFileSync(fileName, audioBuffer);
 
     // Call OpenAI transcription
     const transcription = await openai.audio.transcriptions.create({
       file: fs.createReadStream(fileName),
-      model: "whisper-1"
+      model: "gpt-4o-mini-transcribe" // faster streaming-friendly model
     });
 
     // Delete temp file
     fs.unlinkSync(fileName);
 
+    // Return transcript
     res.json({ transcript: transcription.text });
   } catch (err) {
     console.error("Transcription error:", err);
