@@ -1,51 +1,61 @@
 // index.js
-import express from "express";
-import cors from "cors";
 import fs from "fs";
-import { fileURLToPath } from "url";
-import { dirname, join } from "path";
+import path from "path";
+import http from "http";
 import OpenAI from "openai";
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filename);
-
-const app = express();
-const PORT = process.env.PORT || 3000;
-
-// Middleware
-app.use(cors());
-app.use(express.json({ limit: "50mb" })); // large chunks
-
-// OpenAI client
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+const PORT = process.env.PORT || 10000;
 
-// Root endpoint
-app.get("/", (req, res) => res.send("Live transcription server running."));
+// In-memory session storage for continuous transcripts
+const sessions = {};
 
-// Transcription endpoint
-app.post("/transcribe", async (req, res) => {
-  try {
-    const { audioBase64 } = req.body;
-    if (!audioBase64) return res.status(400).json({ error: "No audioBase64 provided" });
+const server = http.createServer(async (req, res) => {
+  if (req.method === "POST" && req.url === "/transcribe") {
+    let body = "";
+    req.on("data", chunk => body += chunk);
+    req.on("end", async () => {
+      try {
+        const { audioBase64, sessionId } = JSON.parse(body);
 
-    // Convert base64 to buffer
-    const audioBuffer = Buffer.from(audioBase64, "base64");
-    const tempFile = join(__dirname, `temp-${Date.now()}.webm`);
-    fs.writeFileSync(tempFile, audioBuffer);
+        if (!audioBase64 || !sessionId) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          return res.end(JSON.stringify({ error: "Missing audioBase64 or sessionId" }));
+        }
 
-    // Call OpenAI Whisper
-    const transcription = await openai.audio.transcriptions.create({
-      file: fs.createReadStream(tempFile),
-      model: "whisper-1",
+        // Convert base64 to Buffer
+        const audioBuffer = Buffer.from(audioBase64, "base64");
+        const tmpFile = path.join("/tmp", `chunk-${Date.now()}.webm`);
+        fs.writeFileSync(tmpFile, audioBuffer);
+
+        // Transcribe via OpenAI Whisper
+        const transcription = await openai.audio.transcriptions.create({
+          file: fs.createReadStream(tmpFile),
+          model: "whisper-1"
+        });
+
+        fs.unlinkSync(tmpFile);
+
+        // Append to session transcript
+        if (!sessions[sessionId]) sessions[sessionId] = "";
+        sessions[sessionId] += (sessions[sessionId] ? " " : "") + transcription.text;
+
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({
+          transcript: transcription.text,          // current chunk
+          fullTranscript: sessions[sessionId]      // full so far
+        }));
+
+      } catch (err) {
+        console.error("Transcription error:", err);
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: err.message }));
+      }
     });
-
-    fs.unlinkSync(tempFile); // clean up temp file
-    res.json({ transcript: transcription.text });
-  } catch (err) {
-    console.error("Transcription error:", err);
-    res.status(500).json({ error: err.message });
+  } else {
+    res.writeHead(404);
+    res.end("Not Found");
   }
 });
 
-// Start server
-app.listen(PORT, () => console.log(`Server listening on port ${PORT}`));
+server.listen(PORT, () => console.log(`Server listening on port ${PORT}`));
