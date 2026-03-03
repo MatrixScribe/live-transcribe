@@ -1,16 +1,20 @@
 {
   "name": "live-transcribe",
   "version": "1.0.0",
-  "description": "Live transcription service with chunked recording and PayPal payment",
+  "description": "Live transcription backend with chunked audio processing",
   "main": "index.js",
   "type": "module",
   "scripts": {
     "start": "node index.js"
   },
   "dependencies": {
-  "express": "^4.18.2",
-  "cors": "^2.8.5",
-  "body-parser": "^1.20.2",
-  "openai": "^5.1.0",
-  "base64-arraybuffer": "^1.0.2"
+    "express": "^4.18.2",
+    "cors": "^2.8.5",
+    "openai": "^4.23.1",
+    "body-parser": "^1.20.2",
+    "base64-arraybuffer": "^1.0.2",
+    "ffmpeg-static": "^5.1.0",
+    "fluent-ffmpeg": "^2.1.2",
+    "multer": "^1.4.5-lts.1"
+  }
 }

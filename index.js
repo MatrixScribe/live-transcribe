@@ -7,7 +7,8 @@ import path from "path";
 import { fileURLToPath } from "url";
 import OpenAI from "openai";
 import { decode } from "base64-arraybuffer";
-import { spawn } from "child_process"; // for optional conversion
+import ffmpegPath from "ffmpeg-static";
+import ffmpeg from "fluent-ffmpeg";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -17,31 +18,12 @@ const PORT = process.env.PORT || 10000;
 
 // ---------------- Middleware ----------------
 app.use(cors());
-app.use(bodyParser.json({ limit: "20mb" })); // larger chunks
+app.use(bodyParser.json({ limit: "50mb" })); // increased for longer chunks
 
-// ---------------- OpenAI Client ----------------
+// ---------------- OpenAI ----------------
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY
 });
-
-// ---------------- Utility: Convert WebM to WAV ----------------
-// Optional: ensures Whisper can read it without failing
-async function webmToWav(inputPath, outputPath) {
-  return new Promise((resolve, reject) => {
-    const ffmpeg = spawn("ffmpeg", [
-      "-y",
-      "-i", inputPath,
-      "-ar", "16000", // sample rate for Whisper
-      "-ac", "1",     // mono
-      outputPath
-    ]);
-
-    ffmpeg.on("close", (code) => {
-      if (code === 0) resolve(outputPath);
-      else reject(new Error("ffmpeg failed with code " + code));
-    });
-  });
-}
 
 // ---------------- POST /transcribe ----------------
 app.post("/transcribe", async (req, res) => {
@@ -49,21 +31,26 @@ app.post("/transcribe", async (req, res) => {
     const { audioBase64, sessionId } = req.body;
     if (!audioBase64) return res.status(400).json({ error: "No audioBase64 provided" });
 
-    // Decode base64 into a Uint8Array
-    const audioBuffer = new Uint8Array(decode(audioBase64));
+    // Convert base64 to buffer
+    const audioBuffer = Buffer.from(decode(audioBase64));
 
-    // Temporary file paths
-    const timestamp = Date.now();
-    const webmFile = path.join(__dirname, `${sessionId || "session"}-${timestamp}.webm`);
-    const wavFile = path.join(__dirname, `${sessionId || "session"}-${timestamp}.wav`);
-
-    // Save the WebM chunk
+    // Save temporary WebM
+    const webmFile = path.join(__dirname, `${sessionId || "session"}-${Date.now()}.webm`);
     fs.writeFileSync(webmFile, audioBuffer);
 
-    // Convert to WAV for Whisper reliability
-    await webmToWav(webmFile, wavFile);
+    // Convert to WAV using ffmpeg-static
+    const wavFile = webmFile.replace(".webm", ".wav");
 
-    // Call OpenAI transcription
+    await new Promise((resolve, reject) => {
+      ffmpeg(webmFile)
+        .setFfmpegPath(ffmpegPath)
+        .output(wavFile)
+        .on("end", () => resolve())
+        .on("error", (err) => reject(err))
+        .run();
+    });
+
+    // Transcribe with OpenAI
     const transcription = await openai.audio.transcriptions.create({
       file: fs.createReadStream(wavFile),
       model: "whisper-1"
@@ -73,7 +60,6 @@ app.post("/transcribe", async (req, res) => {
     fs.unlinkSync(webmFile);
     fs.unlinkSync(wavFile);
 
-    // Return transcript
     res.json({ transcript: transcription.text });
 
   } catch (err) {
