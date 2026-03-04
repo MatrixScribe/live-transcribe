@@ -1,6 +1,4 @@
 node_modules/
-*.log
-*.env
-temp_*.wav
-temp_*.webm
-.DS_Store
+tmp/
+.env
+package-lock.json
