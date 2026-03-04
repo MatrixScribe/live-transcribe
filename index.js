@@ -1,71 +1,87 @@
 import express from "express";
 import cors from "cors";
-import fs from "fs";
-import { spawn } from "child_process";
-import path from "path";
 import bodyParser from "body-parser";
+import fs from "fs";
+import { tmpdir } from "os";
+import path from "path";
+import { fileURLToPath } from "url";
+import ffmpeg from "ffmpeg-static";
+import { spawn } from "child_process";
 import OpenAI from "openai";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 const app = express();
 const PORT = process.env.PORT || 10000;
 
-// ---------------- Middlewares ----------------
+// ---------------- Middleware ----------------
 app.use(cors());
 app.use(bodyParser.json({ limit: "50mb" }));
 
-// ---------------- OpenAI Setup ----------------
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+// ---------------- OpenAI Client ----------------
+const openai = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY,
+});
 
-// ---------------- Paths ----------------
-const ffmpegPath = path.resolve("./ffmpeg");
+// ---------------- Helper: Convert WebM to WAV ----------------
+async function convertWebMToWav(webmBuffer) {
+  return new Promise((resolve, reject) => {
+    const inputPath = path.join(tmpdir(), `input_${Date.now()}.webm`);
+    const outputPath = path.join(tmpdir(), `output_${Date.now()}.wav`);
 
-// ---------------- Transcribe Route ----------------
+    fs.writeFileSync(inputPath, webmBuffer);
+
+    const ffmpegProcess = spawn(ffmpeg, [
+      "-y",
+      "-i", inputPath,
+      "-ar", "16000", // 16kHz for OpenAI
+      "-ac", "1",     // mono
+      outputPath
+    ]);
+
+    ffmpegProcess.on("error", (err) => reject(err));
+    ffmpegProcess.stderr.on("data", () => {}); // suppress logs
+
+    ffmpegProcess.on("close", (code) => {
+      if (code !== 0) return reject(new Error("FFmpeg failed"));
+
+      const wavBuffer = fs.readFileSync(outputPath);
+      fs.unlinkSync(inputPath);
+      fs.unlinkSync(outputPath);
+      resolve(wavBuffer);
+    });
+  });
+}
+
+// ---------------- POST /transcribe ----------------
 app.post("/transcribe", async (req, res) => {
   try {
     const { audioBase64, sessionId } = req.body;
-    if (!audioBase64) return res.status(400).json({ error: "Missing audio data" });
+    if (!audioBase64) return res.status(400).json({ error: "No audio sent" });
 
-    const audioBuffer = Buffer.from(audioBase64, "base64");
-    const tempInput = `temp_${sessionId}.webm`;
-    const tempOutput = `temp_${sessionId}.wav`;
+    const webmBuffer = Buffer.from(audioBase64, "base64");
 
-    fs.writeFileSync(tempInput, audioBuffer);
+    // Convert WebM -> WAV
+    const wavBuffer = await convertWebMToWav(webmBuffer);
 
-    // Convert to wav using prebuilt FFmpeg
-    await new Promise((resolve, reject) => {
-      const ff = spawn(ffmpegPath, [
-        "-y",
-        "-i", tempInput,
-        "-ar", "16000",
-        "-ac", "1",
-        "-f", "wav",
-        tempOutput
-      ]);
-
-      ff.on("error", reject);
-      ff.on("close", (code) => {
-        if (code !== 0) reject(new Error(`FFmpeg exited with ${code}`));
-        else resolve();
-      });
-    });
-
-    // Read wav file and send to OpenAI transcription
-    const audioFile = fs.readFileSync(tempOutput);
+    // Send to OpenAI
     const response = await openai.audio.transcriptions.create({
-      file: audioFile,
-      model: "whisper-1"
+      file: wavBuffer,
+      model: "gpt-4o-mini-transcribe",
+      // You can also use "whisper-1" if preferred
     });
 
-    // Clean up temp files
-    fs.unlinkSync(tempInput);
-    fs.unlinkSync(tempOutput);
+    const transcript = response.text || "";
 
-    res.json({ transcript: response.text || "" });
+    res.json({ transcript });
   } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: err.message || "Transcription error" });
+    console.error("Transcription error:", err);
+    res.status(500).json({ error: "Transcription failed" });
   }
 });
 
 // ---------------- Start Server ----------------
-app.listen(PORT, () => console.log(`Server listening on port ${PORT}`));
+app.listen(PORT, () => {
+  console.log(`Server listening on port ${PORT}`);
+});
