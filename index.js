@@ -1,52 +1,71 @@
 import express from "express";
 import cors from "cors";
-import { WebSocketServer } from "ws";
+import fs from "fs";
+import { spawn } from "child_process";
+import path from "path";
+import bodyParser from "body-parser";
 import OpenAI from "openai";
-import dotenv from "dotenv";
-
-dotenv.config();
 
 const app = express();
-const port = process.env.PORT || 10000;
+const PORT = process.env.PORT || 10000;
 
+// ---------------- Middlewares ----------------
 app.use(cors());
-app.use(express.json({ limit: "50mb" }));
+app.use(bodyParser.json({ limit: "50mb" }));
 
-// Initialize OpenAI
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY
-});
+// ---------------- OpenAI Setup ----------------
+const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-// Simple health check
-app.get("/", (req, res) => res.send("Live Transcribe backend online"));
+// ---------------- Paths ----------------
+const ffmpegPath = path.resolve("./ffmpeg");
 
-// Transcription endpoint
+// ---------------- Transcribe Route ----------------
 app.post("/transcribe", async (req, res) => {
   try {
     const { audioBase64, sessionId } = req.body;
-    if (!audioBase64) return res.status(400).json({ error: "No audio provided" });
+    if (!audioBase64) return res.status(400).json({ error: "Missing audio data" });
 
-    const buffer = Buffer.from(audioBase64, "base64");
+    const audioBuffer = Buffer.from(audioBase64, "base64");
+    const tempInput = `temp_${sessionId}.webm`;
+    const tempOutput = `temp_${sessionId}.wav`;
 
+    fs.writeFileSync(tempInput, audioBuffer);
+
+    // Convert to wav using prebuilt FFmpeg
+    await new Promise((resolve, reject) => {
+      const ff = spawn(ffmpegPath, [
+        "-y",
+        "-i", tempInput,
+        "-ar", "16000",
+        "-ac", "1",
+        "-f", "wav",
+        tempOutput
+      ]);
+
+      ff.on("error", reject);
+      ff.on("close", (code) => {
+        if (code !== 0) reject(new Error(`FFmpeg exited with ${code}`));
+        else resolve();
+      });
+    });
+
+    // Read wav file and send to OpenAI transcription
+    const audioFile = fs.readFileSync(tempOutput);
     const response = await openai.audio.transcriptions.create({
-      file: buffer,
+      file: audioFile,
       model: "whisper-1"
     });
 
-    const transcript = response.text || "";
-    res.json({ transcript });
+    // Clean up temp files
+    fs.unlinkSync(tempInput);
+    fs.unlinkSync(tempOutput);
+
+    res.json({ transcript: response.text || "" });
   } catch (err) {
-    console.error("Transcription error:", err);
-    res.status(500).json({ error: err.message || "Transcription failed" });
+    console.error(err);
+    res.status(500).json({ error: err.message || "Transcription error" });
   }
 });
 
-// Start server
-const server = app.listen(port, () => console.log(`Server listening on port ${port}`));
-
-// WebSocket (optional, for future real-time streaming)
-const wss = new WebSocketServer({ server });
-wss.on("connection", ws => {
-  console.log("WS client connected");
-  ws.on("message", msg => console.log("WS message:", msg.toString()));
-});
+// ---------------- Start Server ----------------
+app.listen(PORT, () => console.log(`Server listening on port ${PORT}`));

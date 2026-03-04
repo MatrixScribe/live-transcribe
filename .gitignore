@@ -1,39 +1,6 @@
-# Node modules (never commit these)
 node_modules/
-
-# Logs
-logs/
 *.log
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-
-# Environment variables (important!)
-.env
-
-# OS / IDE files
+*.env
+temp_*.wav
+temp_*.webm
 .DS_Store
-Thumbs.db
-*.swp
-.vscode/
-.idea/
-
-# Build artifacts (if any)
-dist/
-build/
-
-# Temporary or system files
-*.tmp
-*.temp
-
-# PDF / Audio exports (if generated locally)
-*.pdf
-*.webm
-*.wav
-
-# Package lock files – optional if you want to force Render to install fresh
-package-lock.json
-yarn.lock
-
-# Other user-specific files
-*.sublime-workspace
