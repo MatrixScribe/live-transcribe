@@ -1,69 +1,71 @@
 import express from "express";
 import cors from "cors";
+import bodyParser from "body-parser";
 import fs from "fs";
 import path from "path";
-import { execFile } from "child_process";
+import { fileURLToPath } from "url";
+import ffmpeg from "fluent-ffmpeg";
 import ffmpegPath from "ffmpeg-static";
-import bodyParser from "body-parser";
-import { Configuration, OpenAIApi } from "openai";
+import OpenAI from "openai";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 const app = express();
-const port = process.env.PORT || 10000;
-
 app.use(cors());
 app.use(bodyParser.json({ limit: "50mb" }));
 
-// OpenAI config
-const configuration = new Configuration({
-  apiKey: process.env.OPENAI_API_KEY,
+// Use prebuilt ffmpeg
+ffmpeg.setFfmpegPath(ffmpegPath);
+
+const openai = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY
 });
-const openai = new OpenAIApi(configuration);
 
-// Ensure temp folder exists
-const tempDir = path.join(process.cwd(), "tmp");
-if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir);
+// Temporary storage folder for segments
+const SEGMENT_DIR = path.join(__dirname, "segments");
+if (!fs.existsSync(SEGMENT_DIR)) fs.mkdirSync(SEGMENT_DIR);
 
-// Helper: convert webm/ogg blob to WAV
-function convertToWav(inputBuffer) {
-  return new Promise((resolve, reject) => {
-    const inputPath = path.join(tempDir, `input-${Date.now()}.webm`);
-    const outputPath = path.join(tempDir, `output-${Date.now()}.wav`);
-    fs.writeFileSync(inputPath, inputBuffer);
-
-    execFile(ffmpegPath, ["-y", "-i", inputPath, "-ar", "16000", "-ac", "1", outputPath], (err) => {
-      if (err) return reject(err);
-      const wavBuffer = fs.readFileSync(outputPath);
-      fs.unlinkSync(inputPath);
-      fs.unlinkSync(outputPath);
-      resolve(wavBuffer);
-    });
-  });
-}
-
-// Route: receive audio chunk
+// ---------------- Transcription endpoint ----------------
 app.post("/transcribe", async (req, res) => {
   try {
     const { audioBase64, sessionId } = req.body;
-    if (!audioBase64) return res.status(400).json({ error: "No audioBase64 provided" });
+    if (!audioBase64 || !sessionId) return res.status(400).json({ error: "Missing audioBase64 or sessionId" });
 
-    const audioBuffer = Buffer.from(audioBase64, "base64");
+    const buffer = Buffer.from(audioBase64, "base64");
+    const tempFile = path.join(SEGMENT_DIR, `${sessionId}_${Date.now()}.webm`);
+    fs.writeFileSync(tempFile, buffer);
 
-    // Convert to WAV
-    const wavBuffer = await convertToWav(audioBuffer);
+    // Convert to WAV for OpenAI (more reliable)
+    const wavFile = tempFile.replace(".webm", ".wav");
 
-    // Send to OpenAI
-    const response = await openai.audio.transcriptions.create({
-      file: wavBuffer,
-      model: "gpt-4o-transcribe",
-      response_format: "json",
+    await new Promise((resolve, reject) => {
+      ffmpeg(tempFile)
+        .toFormat("wav")
+        .on("end", resolve)
+        .on("error", reject)
+        .save(wavFile);
     });
 
-    const transcript = response.text?.trim() || "";
-    return res.json({ transcript });
+    // Transcribe with OpenAI
+    const transcription = await openai.audio.transcriptions.create({
+      file: fs.createReadStream(wavFile),
+      model: "gpt-4o-mini-transcribe"
+    });
+
+    // Clean up temp files
+    fs.unlinkSync(tempFile);
+    fs.unlinkSync(wavFile);
+
+    res.json({ transcript: transcription.text || "" });
   } catch (err) {
     console.error("Transcription error:", err);
-    return res.status(500).json({ error: err.message || "Transcription failed" });
+    res.status(500).json({ error: err.message || "Transcription failed" });
   }
 });
 
-app.listen(port, () => console.log(`Server listening on port ${port}`));
+// ---------------- Health check ----------------
+app.get("/", (req, res) => res.send("Live Transcribe Backend is running"));
+
+const PORT = process.env.PORT || 10000;
+app.listen(PORT, () => console.log(`Server listening on port ${PORT}`));
