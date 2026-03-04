@@ -1,18 +1,17 @@
 {
   "name": "live-transcribe",
   "version": "1.0.0",
-  "type": "module",
+  "description": "Live transcription server",
+  "main": "index.js",
   "scripts": {
     "start": "node index.js"
   },
   "dependencies": {
+    "express": "^4.18.2",
     "cors": "^2.8.5",
     "dotenv": "^16.3.1",
-    "express": "^4.18.2",
-    "openai": "^4.28.0",
-    "ws": "^8.13.0"
-  },
-  "engines": {
-    "node": "18.x"
+    "object-assign": "^4.1.1",
+    "ws": "^8.13.0",
+    "openai": "^4.28.0"
   }
 }
