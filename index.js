@@ -1,63 +1,72 @@
-import express from "express";
-import http from "http";
-import WebSocket from "ws";
-import cors from "cors";
-import { config } from "dotenv";
-import OpenAI from "openai";
+// --------------------------
+// Live Transcription Backend
+// --------------------------
 
-config(); // load .env
+const express = require("express");
+const cors = require("cors");
+const http = require("http");
+const WebSocket = require("ws");
+const { Configuration, OpenAIApi } = require("openai");
+require("dotenv").config();
 
-const app = express();
-app.use(cors());
-app.use(express.json());
-
-const server = http.createServer(app);
-const wss = new WebSocket.Server({ server });
-
-const openai = new OpenAI({
+// --------------------------
+// OpenAI Setup
+// --------------------------
+const configuration = new Configuration({
   apiKey: process.env.OPENAI_API_KEY
 });
+const openai = new OpenAIApi(configuration);
 
-wss.on("connection", (ws) => {
-  console.log("Client connected via WebSocket");
+// --------------------------
+// Express Setup
+// --------------------------
+const app = express();
+app.use(cors());
+app.use(express.json({ limit: "50mb" })); // allow large audio chunks
 
-  let buffer = [];
+const server = http.createServer(app);
 
-  ws.on("message", async (msg) => {
-    // Expecting ArrayBuffer (raw audio chunk)
-    try {
-      const audioData = Buffer.from(msg);
-
-      // Push to buffer for streaming
-      buffer.push(audioData);
-
-      // Send audio to OpenAI streaming
-      if (!ws.transcribing) {
-        ws.transcribing = true;
-
-        const stream = await openai.audio.transcriptions.create({
-          file: Buffer.concat(buffer),
-          model: "gpt-4o-mini-transcribe",
-          response_format: "verbose_json",
-        });
-
-        if (stream.text) {
-          ws.send(JSON.stringify({ transcript: stream.text }));
-        }
-
-        buffer = []; // reset buffer
-        ws.transcribing = false;
-      }
-    } catch (err) {
-      console.error("WebSocket error:", err);
-      ws.send(JSON.stringify({ error: err.message }));
-    }
-  });
-
-  ws.on("close", () => {
-    console.log("Client disconnected");
-  });
+// --------------------------
+// WebSocket Server
+// --------------------------
+const wss = new WebSocket.Server({ server });
+wss.on("connection", ws => {
+  console.log("WebSocket client connected");
+  ws.send(JSON.stringify({ message: "connected" }));
 });
 
+// --------------------------
+// /transcribe endpoint
+// --------------------------
+app.post("/transcribe", async (req, res) => {
+  try {
+    const { audioBase64, sessionId } = req.body;
+    if (!audioBase64) return res.status(400).json({ error: "No audio provided" });
+
+    // Convert base64 to buffer
+    const audioBuffer = Buffer.from(audioBase64, "base64");
+
+    // Send to OpenAI transcription
+    const response = await openai.audio.transcriptions.create({
+      file: audioBuffer,
+      model: "whisper-1"
+    });
+
+    if (response.text && response.text.trim() !== "") {
+      return res.json({ transcript: response.text.trim() });
+    } else {
+      return res.json({ transcript: "" }); // empty transcript
+    }
+  } catch (err) {
+    console.error("Transcription error:", err.message || err);
+    return res.status(500).json({ error: err.message || "Server error" });
+  }
+});
+
+// --------------------------
+// Start Server
+// --------------------------
 const PORT = process.env.PORT || 10000;
-server.listen(PORT, () => console.log(`Server listening on port ${PORT}`));
+server.listen(PORT, () => {
+  console.log(`Server listening on port ${PORT}`);
+});
