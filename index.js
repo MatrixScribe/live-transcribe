@@ -1,78 +1,89 @@
-// index.js
-import express from "express";
-import cors from "cors";
-import fs from "fs";
-import path from "path";
-import { WebSocketServer } from "ws";
-import ffmpeg from "fluent-ffmpeg";
-import ffmpegPath from "ffmpeg-static";
-import OpenAI from "openai";
+import express from "express"
+import http from "http"
+import { WebSocketServer } from "ws"
+import fs from "fs"
+import path from "path"
+import ffmpeg from "fluent-ffmpeg"
+import OpenAI from "openai"
+import multer from "multer"
 
-ffmpeg.setFfmpegPath(ffmpegPath);
+const app = express()
+const server = http.createServer(app)
 
-const app = express();
-app.use(cors());
-app.use(express.json({ limit: "200mb" }));
+const wss = new WebSocketServer({ server })
 
-const PORT = process.env.PORT || 10000;
-const uploadsDir = path.join(process.cwd(), "uploads");
-if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir);
+const openai = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY
+})
 
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+const uploadDir = "./uploads"
+if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir)
 
-// store session transcripts
-const sessions = {};
+wss.on("connection", (ws) => {
 
-// WebSocket server
-const wss = new WebSocketServer({ noServer: true });
+  console.log("Client connected")
 
-wss.on("connection", ws => {
-  const sessionId = Date.now() + "_" + Math.floor(Math.random() * 10000);
-  sessions[sessionId] = "";
-  ws.send(JSON.stringify({ sessionId }));
+  ws.on("message", async (message) => {
 
-  ws.on("message", async msg => {
     try {
-      const { audioBase64 } = JSON.parse(msg);
-      if (!audioBase64) return;
 
-      const webmFile = path.join(uploadsDir, `${sessionId}.webm`);
-      const wavFile = path.join(uploadsDir, `${sessionId}.wav`);
-      fs.writeFileSync(webmFile, Buffer.from(audioBase64, "base64"));
+      const data = JSON.parse(message)
+
+      const audioBuffer = Buffer.from(data.audioBase64, "base64")
+
+      const webmPath = `${uploadDir}/${Date.now()}.webm`
+      const wavPath = `${uploadDir}/${Date.now()}.wav`
+
+      fs.writeFileSync(webmPath, audioBuffer)
 
       await new Promise((resolve, reject) => {
-        ffmpeg(webmFile)
-          .outputOptions(["-ar 16000", "-ac 1"])
-          .toFormat("wav")
-          .save(wavFile)
+
+        ffmpeg(webmPath)
+          .audioChannels(1)
+          .audioFrequency(16000)
+          .format("wav")
+          .save(wavPath)
           .on("end", resolve)
-          .on("error", reject);
-      });
+          .on("error", reject)
+
+      })
 
       const transcription = await openai.audio.transcriptions.create({
-        file: fs.createReadStream(wavFile),
-        model: "whisper-1"
-      });
+        file: fs.createReadStream(wavPath),
+        model: "gpt-4o-transcribe"
+      })
 
-      const text = transcription.text?.trim() || "";
-      sessions[sessionId] += (sessions[sessionId] ? " " : "") + text;
+      ws.send(JSON.stringify({
+        transcript: transcription.text
+      }))
 
-      ws.send(JSON.stringify({ transcript: text, fullTranscript: sessions[sessionId] }));
-
-      fs.unlinkSync(webmFile);
-      fs.unlinkSync(wavFile);
+      fs.unlinkSync(webmPath)
+      fs.unlinkSync(wavPath)
 
     } catch (err) {
-      console.error("Whisper error:", err.message);
-      ws.send(JSON.stringify({ error: err.message }));
+
+      console.error("Transcription error:", err)
+
+      ws.send(JSON.stringify({
+        error: "transcription_failed"
+      }))
+
     }
-  });
 
-  ws.on("close", () => console.log("Client disconnected:", sessionId));
-});
+  })
 
-// HTTP server
-const server = app.listen(PORT, () => console.log(`Server running on ${PORT}`));
-server.on("upgrade", (req, socket, head) => {
-  wss.handleUpgrade(req, socket, head, ws => wss.emit("connection", ws, req));
-});
+  ws.on("close", () => {
+    console.log("Client disconnected")
+  })
+
+})
+
+app.get("/", (req, res) => {
+  res.send("Live transcription server running")
+})
+
+const PORT = process.env.PORT || 10000
+
+server.listen(PORT, () => {
+  console.log("Server listening on port", PORT)
+})
