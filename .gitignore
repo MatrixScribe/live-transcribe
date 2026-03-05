@@ -1,6 +1,4 @@
-node_modules/
+node_modules
 .env
-*.log
-*.tmp
 temp_*.webm
 temp_*.wav

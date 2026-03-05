@@ -1,7 +1,5 @@
-// index.js
 import express from "express";
 import cors from "cors";
-import bodyParser from "body-parser";
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
@@ -15,73 +13,72 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const app = express();
-app.use(cors());
-app.use(bodyParser.json({ limit: "50mb" }));
 
-// Init OpenAI
+app.use(cors());
+app.use(express.json({ limit: "50mb" }));
+app.use(express.static("public"));
+
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY
 });
 
 app.post("/transcribe", async (req, res) => {
+
   try {
+
     const { audioBase64, sessionId } = req.body;
 
     if (!audioBase64) {
-      console.log("? No audio received");
       return res.json({ transcript: "" });
     }
 
-    // Decode base64
-    const audioBuffer = Buffer.from(audioBase64, "base64");
+    const buffer = Buffer.from(audioBase64, "base64");
 
-    console.log("?? Received audio size:", audioBuffer.length, "bytes");
-
-    if (audioBuffer.length < 15000) {
-      console.log("?? Segment too small — skipping");
+    // skip tiny chunks
+    if (buffer.length < 15000) {
       return res.json({ transcript: "" });
     }
 
-    const tempWebmPath = path.join(__dirname, `temp_${sessionId}.webm`);
-    const tempWavPath = path.join(__dirname, `temp_${sessionId}.wav`);
+    const webm = path.join(__dirname, `temp_${sessionId}.webm`);
+    const wav = path.join(__dirname, `temp_${sessionId}.wav`);
 
-    fs.writeFileSync(tempWebmPath, audioBuffer);
-
-    console.log("?? Converting WebM ? WAV");
+    fs.writeFileSync(webm, buffer);
 
     await new Promise((resolve, reject) => {
-      ffmpeg(tempWebmPath)
-        .toFormat("wav")
-        .save(tempWavPath)
+
+      ffmpeg(webm)
+        .audioFrequency(16000)
+        .audioChannels(1)
+        .format("wav")
+        .save(wav)
         .on("end", resolve)
         .on("error", reject);
+
     });
 
-    console.log("?? Sending to Whisper...");
-
-    const transcription = await openai.audio.transcriptions.create({
-      file: fs.createReadStream(tempWavPath),
+    const result = await openai.audio.transcriptions.create({
+      file: fs.createReadStream(wav),
       model: "whisper-1"
     });
 
-    const transcript = transcription.text?.trim() || "";
+    fs.unlinkSync(webm);
+    fs.unlinkSync(wav);
 
-    console.log("?? Whisper result:", transcript);
-
-    // Cleanup
-    if (fs.existsSync(tempWebmPath)) fs.unlinkSync(tempWebmPath);
-    if (fs.existsSync(tempWavPath)) fs.unlinkSync(tempWavPath);
+    const transcript = result.text?.trim() || "";
 
     res.json({ transcript });
 
   } catch (err) {
-    console.error("? Transcription error:", err);
+
+    console.error("TRANSCRIBE ERROR:", err);
     res.json({ transcript: "" });
+
   }
+
 });
 
 const PORT = process.env.PORT || 10000;
 
 app.listen(PORT, () => {
-  console.log(`?? Server listening on port ${PORT}`);
+  console.log("Server running on port", PORT);
 });
