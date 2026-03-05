@@ -1,65 +1,87 @@
 import express from "express";
+import { WebSocketServer } from "ws";
 import cors from "cors";
 import bodyParser from "body-parser";
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
 import ffmpeg from "fluent-ffmpeg";
-import ffmpegPath from "@ffmpeg-installer/ffmpeg";
+import ffmpegPath from "ffmpeg-static";
 import OpenAI from "openai";
 
-ffmpeg.setFfmpegPath(ffmpegPath.path);
+ffmpeg.setFfmpegPath(ffmpegPath);
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const app = express();
 app.use(cors());
-app.use(bodyParser.json({ limit: "50mb" }));
+app.use(bodyParser.json({ limit: "100mb" }));
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-// ensure uploads folder exists
-const uploadsDir = path.join(__dirname, "uploads");
-if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir);
+// Context memory per session
+const sessionContext = {};
 
-app.post("/transcribe", async (req, res) => {
-  try {
-    const { audioBase64, sessionId } = req.body;
-    if (!audioBase64) return res.json({ transcript: "" });
+// Uploads directory
+const UPLOAD_DIR = path.join(__dirname, "uploads");
+if (!fs.existsSync(UPLOAD_DIR)) fs.mkdirSync(UPLOAD_DIR);
 
-    const tempWebmPath = path.join(uploadsDir, `temp_${sessionId}.webm`);
-    const tempWavPath = path.join(uploadsDir, `temp_${sessionId}.wav`);
+// HTTP server
+const server = app.listen(process.env.PORT || 10000, () =>
+  console.log("Server listening on port", process.env.PORT || 10000)
+);
 
-    const audioBuffer = Buffer.from(audioBase64, "base64");
-    fs.writeFileSync(tempWebmPath, audioBuffer);
+// WebSocket server
+const wss = new WebSocketServer({ server });
 
-    // convert WebM -> WAV
-    await new Promise((resolve, reject) => {
-      ffmpeg(tempWebmPath)
-        .toFormat("wav")
-        .on("end", resolve)
-        .on("error", reject)
-        .save(tempWavPath);
-    });
+wss.on("connection", (ws) => {
+  let sessionId = "session_" + Date.now();
+  sessionContext[sessionId] = [];
 
-    // call OpenAI Whisper
-    const transcription = await openai.audio.transcriptions.create({
-      file: fs.createReadStream(tempWavPath),
-      model: "whisper-1"
-    });
+  ws.on("message", async (msg) => {
+    try {
+      const { audioBase64 } = JSON.parse(msg);
+      if (!audioBase64) return;
 
-    // cleanup
-    fs.unlinkSync(tempWebmPath);
-    fs.unlinkSync(tempWavPath);
+      const webmPath = path.join(UPLOAD_DIR, `${sessionId}_${Date.now()}.webm`);
+      const wavPath = webmPath.replace(".webm", ".wav");
+      fs.writeFileSync(webmPath, Buffer.from(audioBase64, "base64"));
 
-    const transcript = transcription.text?.trim() || "";
-    res.json({ transcript });
-  } catch (err) {
-    console.error("TRANSCRIBE ERROR:", err);
-    res.json({ transcript: "" });
-  }
+      // Convert WebM ? WAV
+      await new Promise((resolve, reject) => {
+        ffmpeg(webmPath)
+          .toFormat("wav")
+          .save(wavPath)
+          .on("end", resolve)
+          .on("error", reject);
+      });
+
+      // Call OpenAI Whisper
+      const transcription = await openai.audio.transcriptions.create({
+        file: fs.createReadStream(wavPath),
+        model: "whisper-1",
+      });
+
+      const text = transcription.text?.trim() || "";
+      sessionContext[sessionId].push(text);
+
+      // Send back to client
+      ws.send(JSON.stringify({ transcript: text, context: sessionContext[sessionId] }));
+
+      // Clean up
+      fs.unlinkSync(webmPath);
+      fs.unlinkSync(wavPath);
+    } catch (err) {
+      console.error("Whisper error:", err);
+      ws.send(JSON.stringify({ transcript: "", error: err.message }));
+    }
+  });
+
+  ws.on("close", () => {
+    delete sessionContext[sessionId];
+    console.log("Client disconnected");
+  });
+
+  ws.send(JSON.stringify({ sessionId, message: "Connected to Pro Streaming Transcribe Server" }));
 });
-
-const PORT = process.env.PORT || 10000;
-app.listen(PORT, () => console.log(`Server listening on port ${PORT}`));

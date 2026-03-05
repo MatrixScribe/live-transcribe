@@ -1,5 +1,4 @@
 node_modules/
-package-lock.json
 uploads/
 .env
-.DS_Store
+*.log
