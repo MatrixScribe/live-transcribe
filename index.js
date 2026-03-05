@@ -1,84 +1,60 @@
-import express from "express";
-import cors from "cors";
-import fs from "fs";
-import path from "path";
-import { fileURLToPath } from "url";
+import WebSocket, { WebSocketServer } from "ws";
 import ffmpeg from "fluent-ffmpeg";
 import ffmpegPath from "ffmpeg-static";
 import OpenAI from "openai";
+import { PassThrough } from "stream";
 
 ffmpeg.setFfmpegPath(ffmpegPath);
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-
-const app = express();
-
-app.use(cors());
-app.use(express.json({ limit: "50mb" }));
-app.use(express.static("public"));
 
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY
 });
 
-app.post("/transcribe", async (req, res) => {
-
-  try {
-
-    const { audioBase64, sessionId } = req.body;
-
-    if (!audioBase64) {
-      return res.json({ transcript: "" });
-    }
-
-    const buffer = Buffer.from(audioBase64, "base64");
-
-    // skip tiny chunks
-    if (buffer.length < 15000) {
-      return res.json({ transcript: "" });
-    }
-
-    const webm = path.join(__dirname, `temp_${sessionId}.webm`);
-    const wav = path.join(__dirname, `temp_${sessionId}.wav`);
-
-    fs.writeFileSync(webm, buffer);
-
-    await new Promise((resolve, reject) => {
-
-      ffmpeg(webm)
-        .audioFrequency(16000)
-        .audioChannels(1)
-        .format("wav")
-        .save(wav)
-        .on("end", resolve)
-        .on("error", reject);
-
-    });
-
-    const result = await openai.audio.transcriptions.create({
-      file: fs.createReadStream(wav),
-      model: "whisper-1"
-    });
-
-    fs.unlinkSync(webm);
-    fs.unlinkSync(wav);
-
-    const transcript = result.text?.trim() || "";
-
-    res.json({ transcript });
-
-  } catch (err) {
-
-    console.error("TRANSCRIBE ERROR:", err);
-    res.json({ transcript: "" });
-
-  }
-
-});
-
 const PORT = process.env.PORT || 10000;
+const wss = new WebSocketServer({ port: PORT });
 
-app.listen(PORT, () => {
-  console.log("Server running on port", PORT);
+console.log(`WebSocket server listening on port ${PORT}`);
+
+wss.on("connection", (ws) => {
+  console.log("Client connected");
+
+  const audioStream = new PassThrough();
+
+  // FFmpeg transforms raw PCM -> WAV
+  const ffmpegProcess = ffmpeg(audioStream)
+    .inputFormat("s16le")
+    .audioFrequency(16000)
+    .audioChannels(1)
+    .format("wav")
+    .on("error", (err) => console.error("FFmpeg error:", err));
+
+  ffmpegProcess.pipe(new PassThrough()); // keep stream flowing
+
+  let buffer = [];
+  ws.on("message", async (msg) => {
+    buffer.push(msg);
+
+    // Send to Whisper every ~1 second (or 16k samples)
+    if (buffer.length >= 20) { 
+      const chunk = Buffer.concat(buffer);
+      buffer = [];
+
+      try {
+        const transcription = await openai.audio.transcriptions.create({
+          file: chunk,
+          model: "whisper-1"
+        });
+        if (transcription.text) {
+          ws.send(JSON.stringify({ transcript: transcription.text }));
+        }
+      } catch (err) {
+        console.error("Whisper error:", err);
+      }
+    }
+  });
+
+  ws.on("close", () => {
+    audioStream.end();
+    console.log("Client disconnected");
+  });
 });
