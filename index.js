@@ -1,87 +1,120 @@
 import express from "express";
-import { WebSocketServer } from "ws";
 import cors from "cors";
-import bodyParser from "body-parser";
 import fs from "fs";
 import path from "path";
-import { fileURLToPath } from "url";
+import { WebSocketServer } from "ws";
 import ffmpeg from "fluent-ffmpeg";
 import ffmpegPath from "ffmpeg-static";
+import { v4 as uuidv4 } from "uuid";
 import OpenAI from "openai";
 
 ffmpeg.setFfmpegPath(ffmpegPath);
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-
 const app = express();
 app.use(cors());
-app.use(bodyParser.json({ limit: "100mb" }));
+app.use(express.json({ limit: "100mb" }));
 
+const PORT = process.env.PORT || 10000;
+
+// OpenAI
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-// Context memory per session
-const sessionContext = {};
+// Store session transcripts in memory (pro-level context)
+const sessions = {};
 
-// Uploads directory
-const UPLOAD_DIR = path.join(__dirname, "uploads");
-if (!fs.existsSync(UPLOAD_DIR)) fs.mkdirSync(UPLOAD_DIR);
+// Ensure uploads folder exists
+const uploadsDir = path.join(process.cwd(), "uploads");
+if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir);
 
-// HTTP server
-const server = app.listen(process.env.PORT || 10000, () =>
-  console.log("Server listening on port", process.env.PORT || 10000)
-);
+// Express POST fallback (optional)
+app.post("/transcribe", async (req, res) => {
+  try {
+    const { audioBase64, sessionId } = req.body;
+    if (!audioBase64 || !sessionId) return res.json({ transcript: "" });
 
-// WebSocket server
-const wss = new WebSocketServer({ server });
+    const sessionFile = path.join(uploadsDir, `${sessionId}_${Date.now()}.webm`);
+    const wavFile = sessionFile.replace(".webm", ".wav");
+    const audioBuffer = Buffer.from(audioBase64, "base64");
+    fs.writeFileSync(sessionFile, audioBuffer);
 
+    // Force re-encode WebM -> WAV (linear PCM)
+    await new Promise((resolve, reject) => {
+      ffmpeg(sessionFile)
+        .outputOptions(["-ar 16000", "-ac 1", "-f wav"])
+        .save(wavFile)
+        .on("end", resolve)
+        .on("error", reject);
+    });
+
+    const transcription = await openai.audio.transcriptions.create({
+      file: fs.createReadStream(wavFile),
+      model: "whisper-1"
+    });
+
+    // Cleanup
+    fs.unlinkSync(sessionFile);
+    fs.unlinkSync(wavFile);
+
+    const transcript = transcription.text?.trim() || "";
+    if (!sessions[sessionId]) sessions[sessionId] = "";
+    sessions[sessionId] += (sessions[sessionId] ? " " : "") + transcript;
+
+    res.json({ transcript, fullTranscript: sessions[sessionId] });
+  } catch (err) {
+    console.error("TRANSCRIBE ERROR:", err);
+    res.json({ transcript: "", fullTranscript: sessions[req.body.sessionId] || "" });
+  }
+});
+
+// WebSocket for pro streaming
+const wss = new WebSocketServer({ noServer: true });
 wss.on("connection", (ws) => {
-  let sessionId = "session_" + Date.now();
-  sessionContext[sessionId] = [];
+  let sessionId = uuidv4();
+  ws.send(JSON.stringify({ sessionId }));
 
   ws.on("message", async (msg) => {
     try {
-      const { audioBase64 } = JSON.parse(msg);
-      if (!audioBase64) return;
+      const data = JSON.parse(msg);
+      if (!data.audioBase64) return;
 
-      const webmPath = path.join(UPLOAD_DIR, `${sessionId}_${Date.now()}.webm`);
-      const wavPath = webmPath.replace(".webm", ".wav");
-      fs.writeFileSync(webmPath, Buffer.from(audioBase64, "base64"));
+      const sessionFile = path.join(uploadsDir, `${sessionId}_${Date.now()}.webm`);
+      const wavFile = sessionFile.replace(".webm", ".wav");
+      const audioBuffer = Buffer.from(data.audioBase64, "base64");
+      fs.writeFileSync(sessionFile, audioBuffer);
 
-      // Convert WebM ? WAV
+      // Re-encode WebM -> WAV
       await new Promise((resolve, reject) => {
-        ffmpeg(webmPath)
-          .toFormat("wav")
-          .save(wavPath)
+        ffmpeg(sessionFile)
+          .outputOptions(["-ar 16000", "-ac 1", "-f wav"])
+          .save(wavFile)
           .on("end", resolve)
           .on("error", reject);
       });
 
-      // Call OpenAI Whisper
       const transcription = await openai.audio.transcriptions.create({
-        file: fs.createReadStream(wavPath),
-        model: "whisper-1",
+        file: fs.createReadStream(wavFile),
+        model: "whisper-1"
       });
 
-      const text = transcription.text?.trim() || "";
-      sessionContext[sessionId].push(text);
+      fs.unlinkSync(sessionFile);
+      fs.unlinkSync(wavFile);
 
-      // Send back to client
-      ws.send(JSON.stringify({ transcript: text, context: sessionContext[sessionId] }));
+      const transcript = transcription.text?.trim() || "";
+      if (!sessions[sessionId]) sessions[sessionId] = "";
+      sessions[sessionId] += (sessions[sessionId] ? " " : "") + transcript;
 
-      // Clean up
-      fs.unlinkSync(webmPath);
-      fs.unlinkSync(wavPath);
+      ws.send(JSON.stringify({ transcript, fullTranscript: sessions[sessionId] }));
     } catch (err) {
       console.error("Whisper error:", err);
-      ws.send(JSON.stringify({ transcript: "", error: err.message }));
+      ws.send(JSON.stringify({ error: err.message }));
     }
   });
 
-  ws.on("close", () => {
-    delete sessionContext[sessionId];
-    console.log("Client disconnected");
-  });
+  ws.on("close", () => console.log("Client disconnected:", sessionId));
+});
 
-  ws.send(JSON.stringify({ sessionId, message: "Connected to Pro Streaming Transcribe Server" }));
+// Upgrade HTTP server to handle WS
+const server = app.listen(PORT, () => console.log(`Server listening on port ${PORT}`));
+server.on("upgrade", (request, socket, head) => {
+  wss.handleUpgrade(request, socket, head, (ws) => wss.emit("connection", ws, request));
 });
