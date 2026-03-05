@@ -1,4 +1,3 @@
-// index.js
 import express from "express";
 import cors from "cors";
 import bodyParser from "body-parser";
@@ -6,66 +5,51 @@ import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
 import ffmpeg from "fluent-ffmpeg";
-import ffmpegPath from "ffmpeg-static";
+import ffmpegPath from "@ffmpeg-installer/ffmpeg";
 import OpenAI from "openai";
 
-ffmpeg.setFfmpegPath(ffmpegPath);
+ffmpeg.setFfmpegPath(ffmpegPath.path);
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const app = express();
 app.use(cors());
-app.use(bodyParser.json({ limit: "100mb" })); // increase limit
+app.use(bodyParser.json({ limit: "50mb" }));
 
-// Init OpenAI
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY
-});
+const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-// Ensure uploads folder exists
-const uploadDir = path.join(__dirname, "uploads");
-if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir);
+// ensure uploads folder exists
+const uploadsDir = path.join(__dirname, "uploads");
+if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir);
 
 app.post("/transcribe", async (req, res) => {
   try {
     const { audioBase64, sessionId } = req.body;
-    if (!audioBase64 || audioBase64.length < 1000) return res.json({ transcript: "" });
+    if (!audioBase64) return res.json({ transcript: "" });
 
-    const tempWebmPath = path.join(uploadDir, `temp_${sessionId}_${Date.now()}.webm`);
-    const tempWavPath = path.join(uploadDir, `temp_${sessionId}_${Date.now()}.wav`);
+    const tempWebmPath = path.join(uploadsDir, `temp_${sessionId}.webm`);
+    const tempWavPath = path.join(uploadsDir, `temp_${sessionId}.wav`);
 
-    // Decode base64 to WebM
     const audioBuffer = Buffer.from(audioBase64, "base64");
     fs.writeFileSync(tempWebmPath, audioBuffer);
 
-    const stats = fs.statSync(tempWebmPath);
-    console.log("Uploaded file:", tempWebmPath, "size:", stats.size);
-    if (stats.size < 20000) { // skip tiny chunks
-      fs.unlinkSync(tempWebmPath);
-      return res.json({ transcript: "" });
-    }
-
-    // Convert WebM ? WAV
+    // convert WebM -> WAV
     await new Promise((resolve, reject) => {
       ffmpeg(tempWebmPath)
-        .inputOptions(["-f webm", "-c:a copy"])
         .toFormat("wav")
-        .save(tempWavPath)
         .on("end", resolve)
-        .on("error", (err) => {
-          console.error("FFmpeg conversion error:", err);
-          reject(err);
-        });
+        .on("error", reject)
+        .save(tempWavPath);
     });
 
-    // OpenAI Whisper transcription
+    // call OpenAI Whisper
     const transcription = await openai.audio.transcriptions.create({
       file: fs.createReadStream(tempWavPath),
       model: "whisper-1"
     });
 
-    // Cleanup temp files
+    // cleanup
     fs.unlinkSync(tempWebmPath);
     fs.unlinkSync(tempWavPath);
 
