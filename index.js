@@ -26,15 +26,29 @@ const openai = new OpenAI({
 app.post("/transcribe", async (req, res) => {
   try {
     const { audioBase64, sessionId } = req.body;
-    if (!audioBase64) return res.json({ transcript: "" });
 
-    // Decode base64 ? temp WebM file
+    if (!audioBase64) {
+      console.log("? No audio received");
+      return res.json({ transcript: "" });
+    }
+
+    // Decode base64
+    const audioBuffer = Buffer.from(audioBase64, "base64");
+
+    console.log("?? Received audio size:", audioBuffer.length, "bytes");
+
+    if (audioBuffer.length < 15000) {
+      console.log("?? Segment too small — skipping");
+      return res.json({ transcript: "" });
+    }
+
     const tempWebmPath = path.join(__dirname, `temp_${sessionId}.webm`);
     const tempWavPath = path.join(__dirname, `temp_${sessionId}.wav`);
-    const audioBuffer = Buffer.from(audioBase64, "base64");
+
     fs.writeFileSync(tempWebmPath, audioBuffer);
 
-    // Convert WebM ? WAV using ffmpeg
+    console.log("?? Converting WebM ? WAV");
+
     await new Promise((resolve, reject) => {
       ffmpeg(tempWebmPath)
         .toFormat("wav")
@@ -43,23 +57,31 @@ app.post("/transcribe", async (req, res) => {
         .on("error", reject);
     });
 
-    // Call OpenAI Whisper
+    console.log("?? Sending to Whisper...");
+
     const transcription = await openai.audio.transcriptions.create({
       file: fs.createReadStream(tempWavPath),
       model: "whisper-1"
     });
 
-    // Cleanup temp files
-    fs.unlinkSync(tempWebmPath);
-    fs.unlinkSync(tempWavPath);
-
     const transcript = transcription.text?.trim() || "";
+
+    console.log("?? Whisper result:", transcript);
+
+    // Cleanup
+    if (fs.existsSync(tempWebmPath)) fs.unlinkSync(tempWebmPath);
+    if (fs.existsSync(tempWavPath)) fs.unlinkSync(tempWavPath);
+
     res.json({ transcript });
+
   } catch (err) {
-    console.error("Transcription error:", err);
+    console.error("? Transcription error:", err);
     res.json({ transcript: "" });
   }
 });
 
 const PORT = process.env.PORT || 10000;
-app.listen(PORT, () => console.log(`Server listening on port ${PORT}`));
+
+app.listen(PORT, () => {
+  console.log(`?? Server listening on port ${PORT}`);
+});
