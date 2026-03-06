@@ -1,6 +1,6 @@
 {
-  "name": "live-transcription-server",
-  "version": "3.0.0",
+  "name": "live-transcribe",
+  "version": "1.0.0",
   "type": "module",
   "main": "server.js",
   "scripts": {
@@ -8,6 +8,7 @@
   },
   "dependencies": {
     "express": "^4.19.2",
+    "uuid": "^9.0.0",
     "ws": "^8.17.0"
   }
 }

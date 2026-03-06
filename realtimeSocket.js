@@ -1,120 +1,86 @@
-import { WebSocketServer } from "ws"
 import WebSocket from "ws"
-import crypto from "crypto"
 
-import {createSession,getSession,removeSession} from "./sessionManager.js"
+export default class RealtimeSession {
 
-export function setupRealtimeSocket(server){
+  constructor(clientWS) {
 
-const wss = new WebSocketServer({
-server,
-path:"/ws"
-})
+    this.clientWS = clientWS
+    this.openaiWS = null
 
-wss.on("connection",(clientWS)=>{
+  }
 
-const sessionID = crypto.randomUUID()
+  async init() {
 
-createSession(sessionID,clientWS)
+    this.openaiWS = new WebSocket(
+      "wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview",
+      {
+        headers: {
+          Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+          "OpenAI-Beta": "realtime=v1"
+        }
+      }
+    )
 
-console.log("Client connected:",sessionID)
+    this.openaiWS.on("open", () => {
 
-const openaiWS = new WebSocket(
-"wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview",
-{
-headers:{
-"Authorization":`Bearer ${process.env.OPENAI_API_KEY}`,
-"OpenAI-Beta":"realtime=v1"
-}
-}
-)
+      console.log("Connected to OpenAI realtime")
 
-openaiWS.on("open",()=>{
+      this.openaiWS.send(JSON.stringify({
+        type: "session.update",
+        session: {
+          modalities: ["text"],
+          input_audio_format: "pcm16",
+          turn_detection: {
+            type: "server_vad"
+          }
+        }
+      }))
 
-console.log("Connected to OpenAI realtime")
+    })
 
-openaiWS.send(JSON.stringify({
+    this.openaiWS.on("message", (msg) => {
 
-type:"session.update",
+      try {
 
-session:{
-modalities:["text"],
-input_audio_format:"webm",
-turn_detection:{
-type:"server_vad"
-},
-transcription:{
-model:"gpt-4o-transcribe"
-}
-}
+        const data = JSON.parse(msg)
 
-}))
+        if (data.type === "response.output_text.delta") {
 
-})
+          this.clientWS.send(JSON.stringify({
+            transcript: data.delta
+          }))
 
-clientWS.on("message",(audioChunk)=>{
+        }
 
-if(openaiWS.readyState === WebSocket.OPEN){
+      } catch (err) {
 
-openaiWS.send(JSON.stringify({
+        console.error("OpenAI message error:", err)
 
-type:"input_audio_buffer.append",
-audio:Buffer.from(audioChunk).toString("base64")
+      }
 
-}))
+    })
 
-}
+  }
 
-})
+  sendAudio(base64Chunk) {
 
-openaiWS.on("message",(data)=>{
+    if (!this.openaiWS || this.openaiWS.readyState !== 1) return
 
-try{
+    this.openaiWS.send(JSON.stringify({
+      type: "input_audio_buffer.append",
+      audio: base64Chunk
+    }))
 
-const msg = JSON.parse(data)
+  }
 
-if(msg.type === "response.output_text.delta"){
+  close() {
 
-const session = getSession(sessionID)
+    if (this.openaiWS) {
 
-const text = msg.delta
+      this.openaiWS.close()
 
-session.transcript += text
+    }
 
-clientWS.send(JSON.stringify({
-
-transcript:`Speaker ${session.speaker}: ${text}`
-
-}))
-
-}
-
-if(msg.type === "response.completed"){
-
-const session = getSession(sessionID)
-
-session.speaker++
-
-}
-
-}catch(err){
-
-console.error("Parse error",err)
-
-}
-
-})
-
-clientWS.on("close",()=>{
-
-console.log("Client disconnected:",sessionID)
-
-removeSession(sessionID)
-
-openaiWS.close()
-
-})
-
-})
+  }
 
 }

@@ -1,18 +1,36 @@
-export const sessions = new Map()
+import { v4 as uuidv4 } from "uuid"
+import RealtimeSession from "./realtimeSession.js"
 
-export function createSession(id, socket){
-  sessions.set(id,{
-    id,
-    socket,
-    speaker:1,
-    transcript:""
-  })
+const sessions = new Map()
+
+export function createSession(ws) {
+
+  const id = uuidv4()
+
+  const session = new RealtimeSession(ws)
+
+  sessions.set(id, session)
+
+  return id
+
 }
 
-export function getSession(id){
+export function getSession(id) {
+
   return sessions.get(id)
+
 }
 
-export function removeSession(id){
-  sessions.delete(id)
+export function removeSession(id) {
+
+  const session = sessions.get(id)
+
+  if (session) {
+
+    session.close()
+
+    sessions.delete(id)
+
+  }
+
 }
