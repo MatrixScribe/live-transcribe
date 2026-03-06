@@ -1,7 +1,7 @@
 import express from "express"
 import http from "http"
 import { WebSocketServer } from "ws"
-import { createSession, removeSession, getSession } from "./core/sessionManager.js"
+import { createSession, removeSession, getSession } from "./sessionManager.js"
 
 const app = express()
 
