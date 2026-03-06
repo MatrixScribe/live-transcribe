@@ -1,14 +1,13 @@
 {
-  "name": "live-transcribe",
-  "version": "1.0.0",
+  "name": "live-transcription-server",
+  "version": "3.0.0",
   "type": "module",
-  "main": "index.js",
+  "main": "server.js",
   "scripts": {
-    "start": "node index.js"
+    "start": "node server.js"
   },
   "dependencies": {
     "express": "^4.19.2",
-    "openai": "^4.56.0",
     "ws": "^8.17.0"
   }
 }
