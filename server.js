@@ -5,18 +5,10 @@ import WebSocket, { WebSocketServer } from "ws";
 const OPENAI_KEY = process.env.OPENAI_API_KEY;
 
 const app = express();
-
-// Simple health check endpoint
-app.get("/", (req, res) => {
-  res.send("Live transcription server running");
-});
+app.get("/", (req, res) => res.send("Live Transcription Server Running"));
 
 const server = http.createServer(app);
-
-const wss = new WebSocketServer({
-  server,
-  path: "/ws",
-});
+const wss = new WebSocketServer({ server, path: "/ws" });
 
 wss.on("connection", (client) => {
   console.log("Client connected");
@@ -32,21 +24,20 @@ wss.on("connection", (client) => {
     }
   );
 
-  openai.on("open", () => {
-    console.log("Connected to OpenAI Realtime");
-  });
+  openai.on("open", () => console.log("Connected to OpenAI Realtime"));
+  openai.on("close", () => console.log("OpenAI connection closed"));
 
   openai.on("message", (msg) => {
     try {
-      const data = JSON.parse(msg);
+      const data = JSON.parse(msg.toString());
       if (data.type === "response.output_text.delta") {
         client.send(JSON.stringify({ type: "transcript", text: data.delta }));
       }
       if (data.type === "response.completed") {
         client.send(JSON.stringify({ type: "done" }));
       }
-    } catch (e) {
-      console.error("OpenAI parse error:", e.message);
+    } catch (err) {
+      console.error("OpenAI parse error:", err.message);
     }
   });
 
@@ -57,10 +48,7 @@ wss.on("connection", (client) => {
       if (data.type === "audio") {
         if (openai.readyState === 1) {
           openai.send(
-            JSON.stringify({
-              type: "input_audio_buffer.append",
-              audio: data.chunk,
-            })
+            JSON.stringify({ type: "input_audio_buffer.append", audio: data.chunk })
           );
         }
       }
