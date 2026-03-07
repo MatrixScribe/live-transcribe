@@ -1,85 +1,77 @@
+// core/sessionManager.js
+import crypto from "crypto";
 import WebSocket from "ws";
-import { v4 as uuidv4 } from "uuid";
+import OpenAI from "openai";
 
-const sessions = new Map();
+const sessions = {};
 
-export function createSession(ws) {
-  const id = uuidv4();
-  sessions.set(id, { ws, openai: null });
-  return id;
-}
+export class RealtimeSession {
+  constructor(ws) {
+    this.ws = ws;
+    this.openaiWs = null;
+  }
 
-export function getSession(id) {
-  return sessions.get(id);
-}
+  async init() {
+    const url = "wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview";
 
-export function removeSession(id) {
-  const session = sessions.get(id);
-  if (session?.openai) session.openai.close();
-  sessions.delete(id);
-}
-
-// ?? Initialize OpenAI Realtime WS
-export async function initSession(session) {
-
-  const openaiWs = new WebSocket(
-    "wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview",
-    {
+    this.openaiWs = new WebSocket(url, {
       headers: {
         Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
-        "OpenAI-Beta": "realtime=v1"
+        "OpenAI-Beta": "realtime=v1",
+      },
+    });
+
+    this.openaiWs.on("open", () => {
+      console.log("Connected to OpenAI Realtime API");
+    });
+
+    this.openaiWs.on("message", (event) => {
+      const data = JSON.parse(event.toString());
+
+      // handle partial transcript
+      if (data.type === "transcript.delta") {
+        this.ws.send(JSON.stringify({ type: "transcript", text: data.text }));
       }
-    }
-  );
 
-  session.openai = openaiWs;
-
-  openaiWs.on("open", () => {
-    console.log("Connected to OpenAI Realtime for session");
-
-    // Initialize transcription session
-    openaiWs.send(JSON.stringify({
-      type: "session.update",
-      session: {
-        modalities: ["text"],
-        input_audio_format: "pcm16",
-        transcription: { model: "gpt-4o-mini-transcribe" }
+      // handle final transcript
+      if (data.type === "transcript.final") {
+        this.ws.send(JSON.stringify({ type: "transcript.final", text: data.text }));
       }
-    }));
-  });
+    });
 
-  // ?? Forward transcription deltas to browser
-  openaiWs.on("message", (msg) => {
-    const event = JSON.parse(msg);
+    this.openaiWs.on("error", (err) => console.error("OpenAI WS error:", err));
+  }
 
-    if (event.type === "response.output_text.delta") {
-      session.ws.send(JSON.stringify({
-        type: "transcript",
-        text: event.delta
-      }));
-    }
+  sendAudio(base64Chunk) {
+    if (!this.openaiWs || this.openaiWs.readyState !== WebSocket.OPEN) return;
 
-    if (event.type === "response.completed") {
-      session.ws.send(JSON.stringify({ type: "done" }));
-    }
-  });
+    // append chunk
+    this.openaiWs.send(
+      JSON.stringify({ type: "input_audio_buffer.append", audio: base64Chunk })
+    );
 
-  openaiWs.on("close", () => console.log("OpenAI WS closed for session"));
-  openaiWs.on("error", (err) => console.error("OpenAI WS error:", err));
+    // commit buffer and request response
+    this.openaiWs.send(JSON.stringify({ type: "input_audio_buffer.commit" }));
+    this.openaiWs.send(JSON.stringify({ type: "response.create" }));
+  }
+
+  close() {
+    if (this.openaiWs) this.openaiWs.close();
+  }
 }
 
-// ?? Send audio chunks to OpenAI
-export function sendAudio(session, base64Chunk) {
-  if (!session.openai) return;
-  session.openai.send(JSON.stringify({
-    type: "input_audio_buffer.append",
-    audio: base64Chunk
-  }));
+export function createSession(ws) {
+  const sessionId = crypto.randomUUID();
+  sessions[sessionId] = new RealtimeSession(ws);
+  return sessionId;
 }
 
-// ?? Commit audio and request transcription
-export function commitAudio(session) {
-  if (!session.openai) return;
-  session.openai.send(JSON.stringify({ type: "input_audio_buffer.commit" }));
-  session.openai.send(JSON.stringify({ type: "response.create" }));
+export function getSession(sessionId) {
+  return sessions[sessionId];
+}
+
+export function removeSession(sessionId) {
+  const s = sessions[sessionId];
+  if (s) s.close();
+  delete sessions[sessionId];
 }

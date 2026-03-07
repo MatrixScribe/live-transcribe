@@ -1,65 +1,46 @@
-import express from "express"
-import http from "http"
-import { WebSocketServer } from "ws"
-import { createSession, removeSession, getSession } from "./sessionManager.js"
+// server.js
+import express from "express";
+import http from "http";
+import { WebSocketServer } from "ws";
+import { createSession, removeSession, getSession } from "./core/sessionManager.js";
+import path from "path";
 
-const app = express()
+const app = express();
 
-app.get("/", (req, res) => {
-  res.send("Live Transcription Server Running")
-})
+// serve front-end
+app.use(express.static(path.join(process.cwd(), "public")));
 
-const server = http.createServer(app)
+app.get("/", (req, res) => res.sendFile(path.join(process.cwd(), "public/index.html")));
 
-const wss = new WebSocketServer({
-  server,
-  path: "/ws"
-})
+const server = http.createServer(app);
+
+const wss = new WebSocketServer({ server, path: "/ws" });
 
 wss.on("connection", async (ws) => {
+  const sessionId = createSession(ws);
+  console.log("Client connected:", sessionId);
 
-  const sessionId = createSession(ws)
+  const session = getSession(sessionId);
+  await session.init();
 
-  console.log("Client connected:", sessionId)
-
-  const session = getSession(sessionId)
-
-  await session.init()
-
-  ws.on("message", async (message) => {
-
+  ws.on("message", (msg) => {
     try {
-
-      const data = JSON.parse(message)
-
-      if (data.type === "audio") {
-
-        session.sendAudio(data.chunk)
-
+      const data = JSON.parse(msg.toString());
+      if (data.type === "audio") session.sendAudio(data.chunk);
+      if (data.type === "audio_end") {
+        // optional: finalize transcript
+        console.log("Audio ended for session:", sessionId);
       }
-
     } catch (err) {
-
-      console.error("WS message error:", err)
-
+      console.error("WS message error:", err);
     }
-
-  })
+  });
 
   ws.on("close", () => {
+    console.log("Client disconnected:", sessionId);
+    removeSession(sessionId);
+  });
+});
 
-    console.log("Client disconnected:", sessionId)
-
-    removeSession(sessionId)
-
-  })
-
-})
-
-const PORT = process.env.PORT || 10000
-
-server.listen(PORT, () => {
-
-  console.log("Server running on port", PORT)
-
-})
+const PORT = process.env.PORT || 10000;
+server.listen(PORT, () => console.log("Server running on port", PORT));
